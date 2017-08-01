@@ -23,32 +23,37 @@ type Client struct {
 	Secret string
 }
 
-// Leads returns an array of Leads from the API. The critera to filter leads can
-// be configured by passing functional options. See the examples for a look at
-// how to do this.
-func (c Client) Leads(options ...func(*leadConfig)) (*[]Lead, error) {
-	cfg := loadConfig(options)
-
+// Validate that the client has a Client ID and Secret.
+func (c Client) Validate() error {
 	if len(c.ID) == 0 {
-		return nil, errors.New("Missing Client ID")
+		return errors.New("Missing Client ID")
 	}
 
 	if len(c.Secret) == 0 {
-		return nil, errors.New("Missing Client Secret")
+		return errors.New("Missing Client Secret")
 	}
 
-	var response *http.Response
-	var err error
-	if response, err = c.request(apiURL, cfg); err != nil {
+	return nil
+}
+
+func (c Client) fetchPage(cfg leadConfig, page int) (*[]Lead, error) {
+	r, err := c.request(apiURL, cfg, page)
+	if err != nil {
 		return nil, err
 	}
 
-	if response.StatusCode == 403 {
+	defer r.Body.Close()
+
+	if r.StatusCode == 403 {
 		return nil, errors.New("Forbidden")
 	}
 
-	var body []byte
-	if body, err = ioutil.ReadAll(response.Body); err != nil {
+	return parseLeadsFromResponse(r)
+}
+
+func parseLeadsFromResponse(r *http.Response) (*[]Lead, error) {
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
 		return nil, err
 	}
 
@@ -60,7 +65,39 @@ func (c Client) Leads(options ...func(*leadConfig)) (*[]Lead, error) {
 	return &data.Leads, nil
 }
 
-func (c Client) request(url string, cfg leadConfig) (*http.Response, error) {
+// Leads returns an array of Leads from the API.
+func (c Client) Leads(options ...func(*leadConfig)) (*[]Lead, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+
+	cfg := loadConfig(options)
+
+	var leads []Lead
+
+	currentPage := 1
+	for {
+		pageLeads, err := c.fetchPage(cfg, currentPage)
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, l := range *pageLeads {
+			leads = append(leads, l)
+		}
+
+		if len(*pageLeads) < cfg.PerPage {
+			break
+		}
+
+		currentPage++
+	}
+
+	return &leads, nil
+}
+
+func (c Client) request(url string, cfg leadConfig, page int) (*http.Response, error) {
 	timeout := 5 * time.Second
 	dialer := net.Dialer{Timeout: timeout}
 
@@ -85,6 +122,8 @@ func (c Client) request(url string, cfg leadConfig) (*http.Response, error) {
 	if cfg.FromTimestamp > -1 {
 		q.Add("from_timestamp", strconv.Itoa(cfg.FromTimestamp))
 	}
+
+	q.Add("page", strconv.Itoa(page))
 
 	req.URL.RawQuery = q.Encode()
 
